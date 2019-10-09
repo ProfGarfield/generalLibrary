@@ -124,6 +124,8 @@
 --#gen.maxMoves(unit) --> integer
 --#gen.moveRemaining(unit) --> integer
 --#gen.inPolygon(tile,tableOfCoordinates)-->bool
+--#gen.cityCanSupportAnotherUnit(city)-->bool
+--#gen.rehomeUnitsInCapturedCity(city,defender) --> void
 
 --
 -- FUNCTION IMPLEMENTATIONS
@@ -890,8 +892,92 @@ function gen.inPolygon(tile,tableOfCoordinates)
         or (southEastCrossings % 2 == 1) or (southWestCrossings % 2 == 1)
 end
 
+-- gen.cityCanSupportAnotherUnit(city)-->bool
+-- returns true if the city has enough production to support all existing
+-- units and at least one other unit
+-- Units that get free support under fundamentalism are still counted as
+-- "supported", since they still take up a free support "slot" if they are
+-- among the first 8 units supported by the city
+function gen.cityCanSupportAnotherUnit(city)
+    local unitsSupported = 0
+    -- check that unit's location is a tile, otherwise dead units show
+    -- up in the count
+    for unit in civ.iterateUnits() do
+        if unit.homeCity and unit.homeCity == city and unit.type.role <= 5 and
+            civ.getTile(unit.location.x,unit.location.y,unit.location.z) then
+            unitsSupported = unitsSupported +1
+        end
+    end
+	local freeSupport = 0
+	local govtNumber = city.owner.government
+	if govtNumber <= 1 then
+		-- anarchy or despotism
+		freeSupport = city.size
+	elseif govtNumber == 2 then
+		-- monarchy
+		freeSupport = civ.cosmic.supportMonarchy
+	elseif govtNumber == 3 then
+		-- communism
+		freeSupport = civ.cosmic.supportCommunism
+	elseif govtNumber == 4 then
+		freeSupport = civ.cosmic.supportFundamentalism
+	end
+	return (freeSupport+city.totalShield - unitsSupported) > 0 
+end
 
-
+-- gen.rehomeUnitsInCapturedCity(city,defender) --> void
+-- re-homes units in a captured city to other cities owned by
+-- the same tribe, so that they are not disbanded
+function gen.rehomeUnitsInCapturedCity(city,defender)
+	local citySupportTable = {}
+	for unit in civ.iterateUnits() do
+    -- check that unit's location is a tile, otherwise dead units show
+    -- up in the count
+		if unit.homeCity and  civ.getTile(unit.location.x,unit.location.y,unit.location.z) and unit.type.role <= 5 then
+			citySupportTable[unit.homeCity.id] = citySupportTable[unit.homeCity.id] or 0
+			citySupportTable[unit.homeCity.id] = citySupportTable[unit.homeCity.id]+1
+		end
+	end
+	local function canSupportAnotherUnit(city)
+		local freeSupport = 0
+		local govtNumber = city.owner.government
+		if govtNumber <= 1 then
+			-- anarchy or despotism
+			freeSupport = city.size
+		elseif govtNumber == 2 then
+			-- monarchy
+			freeSupport = civ.cosmic.supportMonarchy
+		elseif govtNumber == 3 then
+			-- communism
+			freeSupport = civ.cosmic.supportCommunism
+		elseif govtNumber == 4 then
+			freeSupport = civ.cosmic.supportFundamentalism
+		end
+		-- make sure citySupportTable has an entry for this city
+		citySupportTable[city.id] = citySupportTable[city.id] or 0
+		return (freeSupport+city.totalShield - citySupportTable[city.id])> 0 	
+    end
+	local function taxiDistance(tileA,tileB)
+		return math.abs(tileA.x-tileB.x)+math.abs(tileA.y-tileB.y)
+	end
+	for unit in civ.iterateUnits() do
+		if unit.owner == defender and unit.homeCity == city and civ.getTile(unit.location.x,unit.location.y,unit.location.z) then
+			local bestCitySoFar = nil
+			local bestDistanceSoFar = 1000000
+			for candidateCity in civ.iterateCities() do
+				if candidateCity.owner == defender and canSupportAnotherUnit(candidateCity) 
+					and taxiDistance(candidateCity.location,unit.location) <bestDistanceSoFar then
+					bestCitySoFar = candidateCity
+					bestDistanceSoFar = taxiDistance(bestCitySoFar.location,unit.location)
+				end
+			end
+			unit.homeCity = bestCitySoFar
+			if unit.type.role <= 5 then
+				citySupportTable[bestCitySoFar.id]= (citySupportTable[bestCitySoFar.id] or 0)+1
+			end
+		end
+	end
+end
 
 
 
