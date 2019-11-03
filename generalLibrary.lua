@@ -75,6 +75,9 @@
 --*gen.setToGoingTo(unit,tile)-->void
 --*gen.isNoOrder(unit)-->boolean
 --*gen.setToNoOrders(unit)-->void
+-- gen.isWaiting(unit)-->bool
+-- gen.setToWaiting(unit)-->void
+-- gen.clearWaiting(unit)-->void
 --*gen.isSeeTwoSpaces(unitType)-->boolean
 --*gen.giveSeeTwoSpaces(unitType)-->void
 --*gen.removeSeeTowSpaces(unitType)-->void
@@ -525,7 +528,21 @@ end
 -- gen.setToNoOrders(unit)-->void
 -- function gen.setToNoOrders(unit) end
 
+-- gen.isWaiting(unit)-->bool
+function gen.isWaiting(unit)
+    return unit.attributes & 0x4000 == 0x4000
+end
+-- gen.setToWaiting(unit)-->void
+function gen.setToWaiting(unit)
+    unit.attributes = unit.attributes | 0x4000
+end
+-- gen.clearWaiting(unit)-->void
+function gen.clearWaiting(unit)
+    unit.attributes = unit.attributes & ~0x4000
+end
+--
 -- gen.isSeeTwoSpaces(unitType)-->boolean
+--
 -- function gen.isSeeTwoSpaces(unitType) end
 
 -- gen.giveSeeTwoSpaces(unitType)-->void
@@ -556,10 +573,14 @@ end
 -- function gen.isSubmarine(unitType) end
 
 -- gen.giveSubmarine(unitType)-->void
--- function gen.giveSubmarine(unitType) end
+function gen.giveSubmarine(unitType)
+   unitType.flags = setBit1(unitType.flags,4)
+end
 
 -- gen.removeSubmarine(unitType)-->void
--- function gen.removeSubmarine(unitType) end
+function gen.removeSubmarine(unitType) 
+    unitType.flags = setBit0(unitType.flags,4)
+end
 
 -- gen.isAttackAir(unitType)-->boolean
 -- function gen.isAttackAir(unitType) end
@@ -723,9 +744,10 @@ gen.maxMoves = maxMoves
 
 -- gen.moveRemaining(unit)
 -- returns gen.maxMoves-unit.moveSpent
-function gen.moveRemaining(unit)
-    return gen.maxMoves(unit)-unit.moveSpent
+local function moveRemaining(unit)
+    return maxMoves(unit)-unit.moveSpent
 end
+gen.moveRemaining = moveRemaining
 
 --#gen.inPolygon(tile,tableOfCoordinates)-->bool
 -- the table of coordinates defines the corners of the
@@ -978,6 +1000,99 @@ function gen.rehomeUnitsInCapturedCity(city,defender)
 		end
 	end
 end
+
+
+-- gen.selectNextActiveUnit(activeUnit,customWeightFn)-->void
+-- use as the first line inside the function given to
+-- civ.scen.onActivateUnit(function(unit,source)-->void)
+-- the line should be
+--      gen.selectNextActiveUnit(unit,customWeightFn)
+--      (note: if the first argument to function(unit,source)
+--      isn't called 'unit', use the actual name)
+-- Code sets all other units (owned by the same tribe)
+-- to the wait order, except the next best unit
+-- customWeightFn(unit,activeUnit)-->integer
+-- gives 'weight' to each unit, and the unit with the lowest weight will
+-- be activated next
+-- By default, weight is +1 if unit is not same type as active unit
+-- + 2 per square for distance between activeUnit and unit
+-- + 10000 if on different maps
+-- Units ordered to 'wait' are tracked, and won't be selected again until all
+-- other units are also 'waiting'
+--
+-- No impact on AI tribes
+-- 
+-- This table keeps track of units manually ordered to wait
+-- will not be preserved between save/load
+local waitingUnits = {}
+-- this makes sure the active unit is the one put into the waitingUnits table,
+-- not the next unit the game would activate
+local saveActiveUnit = nil
+
+-- put in onKeyPress
+--      if civ.getActiveUnit() and keyID == 87 then
+--          gen.betterUnitManualWait()
+--      end
+function gen.betterUnitManualWait()
+    if saveActiveUnit then
+        waitingUnits[saveActiveUnit.id]=true
+    end
+end
+
+function gen.selectNextActiveUnit(activeUnit,customWeightFn)
+    if  (not civ.getCurrentTribe().isHuman) then
+        -- If the AI is playing, we don't want to interfere
+        return 
+    end
+    saveActiveUnit = activeUnit
+    local bestWaitingUnit = nil
+    local bestWaitingValue = math.huge
+    local bestNotWaitingUnit = nil
+    local bestNotWaitingValue = math.huge
+    local function defaultWeightFunction(unit,activeUnit)
+        local weight = 0
+        if unit.type ~= activeUnit.type then
+            weight = weight+1
+        end
+        if unit.location.z ~= activeUnit.location.z then
+            weight = weight+10000
+        end
+        weight = weight+math.abs(unit.location.x-activeUnit.location.x)+math.abs(unit.location.y-activeUnit.location.y)
+        return weight
+    end
+    customWeightFn = customWeightFn or defaultWeightFunction
+
+    local activeTribe = civ.getCurrentTribe()
+    for unit in civ.iterateUnits() do
+        if unit.owner== activeTribe and moveRemaining(unit) > 0 and unit ~=activeUnit and unit.order & 0xFF == 0xFF then
+            gen.setToWaiting(unit)
+            if waitingUnits[unit.id] and customWeightFn(unit,activeUnit) < bestWaitingValue then
+                bestWaitingUnit = unit
+                bestWaitingValue = customWeightFn(unit,activeUnit)
+            end
+            if not waitingUnits[unit.id] and customWeightFn(unit,activeUnit) < bestNotWaitingValue then
+                
+                bestNotWaitingUnit = unit
+                bestNotWaitingValue = customWeightFn(unit,activeUnit)
+            end
+        end
+    end
+    if not (bestNotWaitingUnit or bestWaitingUnit) then
+        -- only one active unit left
+        return
+    end
+    if not bestNotWaitingUnit then
+        -- all units are waiting, so clear the waitingUnits table
+        for index,value in pairs(waitingUnits) do
+            waitingUnits[index]=false
+        end
+        gen.clearWaiting(bestWaitingUnit)
+    else
+        gen.clearWaiting(bestNotWaitingUnit)
+    end
+end
+
+
 
 
 
