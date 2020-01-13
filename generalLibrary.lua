@@ -78,6 +78,12 @@
 -- gen.isWaiting(unit)-->bool
 -- gen.setToWaiting(unit)-->void
 -- gen.clearWaiting(unit)-->void
+-- gen.isParadropped(unit)-->void
+-- gen.setParadropped(unit)-->void
+-- gen.clearParadropped(unit)-->void
+-- gen.isMoved(unit)-->boolean
+-- gen.setMoved(unit)-->void
+-- gen.clearMoved(unit)-->void
 --*gen.isSeeTwoSpaces(unitType)-->boolean
 --*gen.giveSeeTwoSpaces(unitType)-->void
 --*gen.removeSeeTowSpaces(unitType)-->void
@@ -129,6 +135,9 @@
 --#gen.inPolygon(tile,tableOfCoordinates)-->bool
 --#gen.cityCanSupportAnotherUnit(city)-->bool
 --#gen.rehomeUnitsInCapturedCity(city,defender) --> void
+--#gen.activate(unit)-->void
+--#gen.activateWithSource(unit,source)-->void
+--#gen.linkActivationFunction(function(unit,source)-->void)-->void
 
 --
 -- FUNCTION IMPLEMENTATIONS
@@ -539,6 +548,32 @@ end
 -- gen.clearWaiting(unit)-->void
 function gen.clearWaiting(unit)
     unit.attributes = unit.attributes & ~0x4000
+end
+-- gen.isParadropped(unit)-->boolean
+function gen.isParadropped(unit)
+    return isBit1(unit.attributes,5)
+end
+-- gen.setParadropped(unit)-->void
+function gen.setParadropped(unit)
+    unit.attributes = setBit1(unit.attributes,5)
+end
+-- gen.clearParadropped(unit)-->void
+function gen.clearParadropped(unit)
+    unit.attributes = setBit0(unit.attributes,5)
+end
+-- gen.isMoved(unit)-->boolean
+-- game sets this flag when a unit moves (even if no move spent)
+-- unit won't heal on next turn if this flag is set
+function gen.isMoved(unit)
+    return isBit1(unit.attributes,7)
+end
+-- gen.setMoved(unit)-->void
+function gen.setMoved(unit)
+    unit.attributes = setBit1(unit.attributes,7)
+end
+-- gen.clearMoved(unit)-->void
+function gen.clearMoved(unit)
+    unit.attributes = setBit0(unit.attributes,7)
 end
 --
 -- gen.isSeeTwoSpaces(unitType)-->boolean
@@ -1002,13 +1037,13 @@ function gen.rehomeUnitsInCapturedCity(city,defender)
 end
 
 
--- gen.selectNextActiveUnit(activeUnit,customWeightFn)-->void
+-- gen.selectNextActiveUnit(activeUnit,source,customWeightFn)-->void
 -- use as the first line inside the function given to
 -- civ.scen.onActivateUnit(function(unit,source)-->void)
 -- the line should be
---      gen.selectNextActiveUnit(unit,customWeightFn)
---      (note: if the first argument to function(unit,source)
---      isn't called 'unit', use the actual name)
+--      gen.selectNextActiveUnit(unit,source,customWeightFn)
+--      (note: if the arguments to function(unit,source)
+--      arent called 'unit' and 'source', use the actual name)
 -- Code sets all other units (owned by the same tribe)
 -- to the wait order, except the next best unit
 -- customWeightFn(unit,activeUnit)-->integer
@@ -1039,16 +1074,21 @@ function gen.betterUnitManualWait()
     end
 end
 
-function gen.selectNextActiveUnit(activeUnit,customWeightFn)
+
+
+function gen.selectNextActiveUnit(activeUnit,source,customWeightFn)
     if  (not civ.getCurrentTribe().isHuman) then
         -- If the AI is playing, we don't want to interfere
         return 
     end
     saveActiveUnit = activeUnit
+    -- if unit activated manually, clear the manual wait for that unit
+    waitingUnits[activeUnit.id]=nil
     local bestWaitingUnit = nil
     local bestWaitingValue = math.huge
     local bestNotWaitingUnit = nil
     local bestNotWaitingValue = math.huge
+    local gotoUnitWithMovementLeft = false
     local function defaultWeightFunction(unit,activeUnit)
         local weight = 0
         if unit.type ~= activeUnit.type then
@@ -1062,23 +1102,33 @@ function gen.selectNextActiveUnit(activeUnit,customWeightFn)
     end
     customWeightFn = customWeightFn or defaultWeightFunction
 
+
     local activeTribe = civ.getCurrentTribe()
     for unit in civ.iterateUnits() do
-        if unit.owner== activeTribe and moveRemaining(unit) > 0 and unit ~=activeUnit and unit.order & 0xFF == 0xFF then
-            gen.setToWaiting(unit)
-            if waitingUnits[unit.id] and customWeightFn(unit,activeUnit) < bestWaitingValue then
-                bestWaitingUnit = unit
-                bestWaitingValue = customWeightFn(unit,activeUnit)
-            end
-            if not waitingUnits[unit.id] and customWeightFn(unit,activeUnit) < bestNotWaitingValue then
-                
-                bestNotWaitingUnit = unit
-                bestNotWaitingValue = customWeightFn(unit,activeUnit)
+        if unit.owner== activeTribe and moveRemaining(unit) > 0 and unit ~=activeUnit then
+            if unit.order & 0xFF == 0xFF then
+                gen.setToWaiting(unit)
+                if waitingUnits[unit.id] and customWeightFn(unit,activeUnit) < bestWaitingValue then
+                    bestWaitingUnit = unit
+                    bestWaitingValue = customWeightFn(unit,activeUnit)
+                end
+                if not waitingUnits[unit.id] and customWeightFn(unit,activeUnit) < bestNotWaitingValue then
+                    
+                    bestNotWaitingUnit = unit
+                    bestNotWaitingValue = customWeightFn(unit,activeUnit)
+                end
+            elseif unit.gotoTile then
+                gotoUnitWithMovementLeft=true
             end
         end
     end
     if not (bestNotWaitingUnit or bestWaitingUnit) then
         -- only one active unit left
+        return
+    end
+    if gotoUnitWithMovementLeft then
+        -- we want to process all units with goto orders first
+        -- so don't clear the 'wait' command for any unit
         return
     end
     if not bestNotWaitingUnit then
@@ -1092,8 +1142,35 @@ function gen.selectNextActiveUnit(activeUnit,customWeightFn)
     end
 end
 
+local activationFunction = function(unit,source) error("Use gen.linkActivationFunction to specify the function to be run when a unit is activated.") end
 
 
+
+-- gen.activate(unit)-->void
+-- use to activate a unit.  This assumes that the 'source' of the activation is true
+-- (i.e. human generated).  Use gen.activateWithSource if false is needed (either sometimes or always)
+function gen.activate(unit)
+    unit:activate()
+    activationFunction(unit,true)
+end
+
+--#gen.activateSource(unit,source)-->void
+-- use to activate a unit and specify the source of the activation
+function gen.activateWithSource(unit,source)
+    unit:activate()
+    activationFunction(unit,source)
+end
+
+--#gen.linkActivationFunction(function(unit,source)-->void)-->void
+-- use to specify the code that should be run when a unit is
+-- activated by gen.activate or gen.activateWtihSource
+function gen.linkActivationFunction(activationFn)
+    if type(activationFn) == "function" then
+        activationFunction = activationFn
+    else
+        error("gen.linkActivationFunction requires a function as the argument.")
+    end
+end
 
 
 
